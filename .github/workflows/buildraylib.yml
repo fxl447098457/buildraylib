@@ -82,7 +82,6 @@ jobs:
       - name: Download Raylib Source
         shell: msys2 {0}
         run: |
-          # 下载 Raylib 源码 (如果 6.0 尚未发布，请将 6.0 改为 5.5 或 master)
           curl -L -o raylib.tar.gz "https://github.com/raysan5/raylib/archive/refs/tags/${{ env.RAYLIB_VERSION }}.tar.gz"
           tar -xzf raylib.tar.gz
           ls -la
@@ -96,18 +95,15 @@ jobs:
           WINLIBS_MSYS=$(cygpath -u "$WINLIBS_BIN")
           export PATH="$WINLIBS_MSYS:$PATH"
           
-          # 查找源码目录 (通常是 raylib-6.0)
           SRC_DIR=$(find . -maxdepth 1 -type d -name "raylib-*" | head -1)
           if [ -z "$SRC_DIR" ]; then
             echo "ERROR: Could not find Raylib source directory"
-            ls -la
             exit 1
           fi
           echo "Source directory: $SRC_DIR"
           
           mkdir -p build && cd build
           
-          # Raylib CMake 配置
           cmake ../$SRC_DIR \
             -G "${{ matrix.cmake_generator }}" \
             -DCMAKE_BUILD_TYPE=Release \
@@ -148,6 +144,8 @@ jobs:
           echo "=== Installation Results ==="
           if [ -d "/raylib-${{ matrix.arch }}/lib" ]; then
             ls -lh "/raylib-${{ matrix.arch }}/lib/"
+          else
+            echo "Install directory not found at /raylib-${{ matrix.arch }}"
           fi
 
       - name: Package Artifacts
@@ -158,23 +156,58 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$pkgName\lib" | Out-Null
           New-Item -ItemType Directory -Force -Path "$pkgName\include" | Out-Null
           
-          $installPath = "C:\msys64\raylib-$arch"
+          # 🔧 修复：增加多重路径检查，兼容 MSYS2 不同的根目录映射
+          $possiblePaths = @(
+            "C:\msys64\raylib-${{ matrix.arch }}",
+            "C:\raylib-${{ matrix.arch }}",
+            "C:\msys64\raylib-$arch",
+            "C:\raylib-$arch"
+          )
           
-          # 收集库文件
-          if (Test-Path "$installPath\lib") {
-            Get-ChildItem -Path "$installPath\lib" -Recurse -Include "*.a","*.lib" | ForEach-Object {
-              Copy-Item $_.FullName -Destination "$pkgName\lib\" -Force
+          $installPath = $null
+          foreach ($p in $possiblePaths) {
+            if (Test-Path $p) {
+              $installPath = $p
+              Write-Host "✓ Found install path: $installPath"
+              break
             }
           }
           
-          # 收集头文件 (优先使用 install 后的 include 目录)
-          $includePath = Join-Path $installPath "include"
-          if (Test-Path $includePath) {
-            Copy-Item "$includePath\*" -Destination "$pkgName\include\" -Recurse -Force
+          $libFiles = @()
+          
+          # 1. 尝试从安装目录收集
+          if ($installPath -and (Test-Path "$installPath\lib")) {
+            Write-Host "Searching for libs in $installPath\lib"
+            $libFiles += Get-ChildItem -Path "$installPath\lib" -Recurse -Include "*.a","*.lib"
+          }
+          
+          # 2. Fallback: 从 build 目录收集
+          if ($libFiles.Count -eq 0) {
+            Write-Host "⚠ No libs found in install path, searching build dir..."
+            $libFiles += Get-ChildItem -Path "build" -Recurse -Include "*.a","*.lib" -ErrorAction SilentlyContinue
+          }
+          
+          Write-Host "=== Total libraries found: $($libFiles.Count) ==="
+          $libFiles | ForEach-Object { Write-Host $_.FullName }
+          
+          if ($libFiles.Count -eq 0) {
+            Write-Error "No library files found! Check the install step logs."
+            exit 1
+          }
+          
+          # 复制库文件
+          foreach ($lib in ($libFiles | Sort-Object Name -Unique)) {
+            Copy-Item $lib.FullName -Destination "$pkgName\lib\" -Force
+          }
+          
+          # 收集头文件
+          if ($installPath -and (Test-Path "$installPath\include")) {
+            Write-Host "✓ Copying headers from: $installPath\include"
+            Copy-Item "$installPath\include\*" -Destination "$pkgName\include\" -Recurse -Force
           } else {
-            # Fallback: 从源码目录复制
             $srcDir = Get-ChildItem -Directory | Where-Object { $_.Name -like "raylib-*" } | Select-Object -First 1
             if ($srcDir) {
+              Write-Host "Using source dir for headers"
               Copy-Item "$($srcDir.FullName)\src\*.h" -Destination "$pkgName\include\" -Force -ErrorAction SilentlyContinue
             }
           }
@@ -189,6 +222,8 @@ jobs:
           $buildInfo | Out-File -Encoding utf8 -FilePath "$pkgName\BUILD_INFO.txt"
           
           # 压缩打包
+          Write-Host "=== Packaging Contents ==="
+          Get-ChildItem "$pkgName" -Recurse | Select-Object FullName
           7z a "${pkgName}.7z" "$pkgName\" -mx=9
           Compress-Archive -Path "$pkgName" -DestinationPath "${pkgName}.zip" -CompressionLevel Optimal
 
@@ -221,6 +256,7 @@ jobs:
           git tag "$TAG_NAME"
           git push origin "$TAG_NAME"
           echo "RELEASE_TAG=$TAG_NAME" >> $GITHUB_ENV
+          echo "Created tag: $TAG_NAME"
 
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
