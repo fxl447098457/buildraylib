@@ -130,10 +130,12 @@ jobs:
           cd build
           mingw32-make -j$(nproc) VERBOSE=1
 
-      - name: Install Raylib
+      # 🔧 修改：在 Install 步骤末尾增加 strip 处理
+      - name: Install and Strip Raylib
         shell: msys2 {0}
         env:
           WINLIBS_BIN: ${{ steps.setup_toolchain.outputs.winlibs_path }}
+          GCC_PREFIX: ${{ steps.setup_toolchain.outputs.gcc_prefix }}
         run: |
           WINLIBS_MSYS=$(cygpath -u "$WINLIBS_BIN")
           export PATH="$WINLIBS_MSYS:$PATH"
@@ -141,11 +143,15 @@ jobs:
           cd build
           mingw32-make install DESTDIR=/ 2>&1 | tee install.log || true
           
-          echo "=== Installation Results ==="
-          if [ -d "/raylib-${{ matrix.arch }}/lib" ]; then
-            ls -lh "/raylib-${{ matrix.arch }}/lib/"
+          echo "=== Stripping libraries to reduce size ==="
+          INSTALL_DIR="/raylib-${{ matrix.arch }}"
+          if [ -d "$INSTALL_DIR/lib" ]; then
+            # 使用对应的 strip 工具处理所有 .a 文件
+            find "$INSTALL_DIR/lib" -name "*.a" -exec ${GCC_PREFIX}-strip --strip-unneeded {} \;
+            echo "=== Stripped Installation Results ==="
+            ls -lh "$INSTALL_DIR/lib/"
           else
-            echo "Install directory not found at /raylib-${{ matrix.arch }}"
+            echo "Install directory not found at $INSTALL_DIR"
           fi
 
       - name: Package Artifacts
@@ -156,7 +162,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$pkgName\lib" | Out-Null
           New-Item -ItemType Directory -Force -Path "$pkgName\include" | Out-Null
           
-          # 🔧 修复：增加多重路径检查，兼容 MSYS2 不同的根目录映射
           $possiblePaths = @(
             "C:\msys64\raylib-${{ matrix.arch }}",
             "C:\raylib-${{ matrix.arch }}",
@@ -175,13 +180,11 @@ jobs:
           
           $libFiles = @()
           
-          # 1. 尝试从安装目录收集
           if ($installPath -and (Test-Path "$installPath\lib")) {
             Write-Host "Searching for libs in $installPath\lib"
             $libFiles += Get-ChildItem -Path "$installPath\lib" -Recurse -Include "*.a","*.lib"
           }
           
-          # 2. Fallback: 从 build 目录收集
           if ($libFiles.Count -eq 0) {
             Write-Host "⚠ No libs found in install path, searching build dir..."
             $libFiles += Get-ChildItem -Path "build" -Recurse -Include "*.a","*.lib" -ErrorAction SilentlyContinue
@@ -195,12 +198,10 @@ jobs:
             exit 1
           }
           
-          # 复制库文件
           foreach ($lib in ($libFiles | Sort-Object Name -Unique)) {
             Copy-Item $lib.FullName -Destination "$pkgName\lib\" -Force
           }
           
-          # 收集头文件
           if ($installPath -and (Test-Path "$installPath\include")) {
             Write-Host "✓ Copying headers from: $installPath\include"
             Copy-Item "$installPath\include\*" -Destination "$pkgName\include\" -Recurse -Force
@@ -212,7 +213,6 @@ jobs:
             }
           }
           
-          # 生成构建信息
           $buildInfo = "Raylib ${{ env.RAYLIB_VERSION }} $arch Static Library`n" +
                        "Compiler: MinGW-w64 GCC 9.3.0 (SJLJ Exception Model)`n" +
                        "Toolchain: winlibs 9.3.0-7.0.0-r3`n" +
@@ -221,7 +221,6 @@ jobs:
                        "Generator: ${{ matrix.cmake_generator }}"
           $buildInfo | Out-File -Encoding utf8 -FilePath "$pkgName\BUILD_INFO.txt"
           
-          # 压缩打包
           Write-Host "=== Packaging Contents ==="
           Get-ChildItem "$pkgName" -Recurse | Select-Object FullName
           7z a "${pkgName}.7z" "$pkgName\" -mx=9
@@ -290,7 +289,7 @@ jobs:
             - **版本**: MinGW-w64 GCC 9.3.0 (winlibs 9.3.0-7.0.0-r3)
             - **异常处理**: SJLJ (SetJump/LongJump)
             - **架构**: x86 / x64
-            - **构建类型**: 纯静态库 (`.a`)，包含头文件
+            - **构建类型**: 纯静态库 (`.a`)，包含头文件 (已 strip 缩减体积)
             
             ### SHA256 校验和
             ```
